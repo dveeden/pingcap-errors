@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"reflect"
 	"strconv"
 	"testing"
@@ -372,6 +373,53 @@ func TestWalkDeep(t *testing.T) {
 	}
 }
 
+func TestWalkDeepNil(t *testing.T) {
+	require.False(t, WalkDeep(nil, func(err error) bool { return true }))
+}
+
+func TestWalkDeepComplexTree(t *testing.T) {
+	err := &errWalkTest{v: 1, cause: &errWalkTest{
+		sub: []error{
+			&errWalkTest{
+				v:     10,
+				cause: &errWalkTest{v: 11},
+			},
+			&errWalkTest{
+				v: 20,
+				sub: []error{
+					&errWalkTest{v: 21},
+					&errWalkTest{v: 22},
+				},
+			},
+			&errWalkTest{
+				v:     30,
+				cause: &errWalkTest{v: 31},
+			},
+		},
+	}}
+
+	assertFind := func(v int, comment string) {
+		if !testFind(err, v) {
+			t.Errorf("%d not found in the error: %s", v, comment)
+		}
+	}
+	assertNotFind := func(v int, comment string) {
+		if testFind(err, v) {
+			t.Errorf("%d found in the error, but not expected: %s", v, comment)
+		}
+	}
+
+	assertFind(1, "shallow search")
+	assertFind(11, "deep search A1")
+	assertFind(21, "deep search A2")
+	assertFind(22, "deep search B1")
+	assertNotFind(23, "deep search Neg")
+	assertFind(31, "deep search B2")
+	assertNotFind(32, "deep search Neg")
+	assertFind(30, "Tree node A")
+	assertFind(20, "Tree node with many children")
+}
+
 type fooError int
 
 func (fooError) Error() string {
@@ -447,4 +495,30 @@ func TestHasTrace(t *testing.T) {
 	require.False(t, HasStack(targetErr.FastGenByArgs("fast gen arg")))
 	require.True(t, HasStack(Trace(targetErr.FastGen("fast gen"))))
 	require.True(t, HasStack(targetErr.GenWithStack("gen")))
+}
+
+func TestGetErrStackMsg(t *testing.T) {
+	require.Equal(t, "", GetErrStackMsg(nil))
+
+	namedErr := Normalize("named err message", RFCCodeText("NamedError"))
+	require.False(t, HasStack(namedErr))
+	require.Equal(t, "named err message", GetErrStackMsg(namedErr))
+	tracedErr := Trace(namedErr)
+	require.Equal(t, "named err message", GetErrStackMsg(tracedErr))
+
+	annotatedErr := Annotate(tracedErr, "annotated message")
+	require.Equal(t, "annotated message: named err message", GetErrStackMsg(annotatedErr))
+
+	annotatedErr = Annotate(annotatedErr, "annotated message 2")
+	require.Equal(t, "annotated message 2: annotated message: named err message", GetErrStackMsg(annotatedErr))
+
+	fundErr := New("new fundamental error")
+	wrappedErr := namedErr.Wrap(fundErr)
+	require.Equal(t, "named err message: new fundamental error", GetErrStackMsg(wrappedErr))
+	fastGen := wrappedErr.FastGen("fast gen")
+	require.Equal(t, "fast gen: new fundamental error", GetErrStackMsg(fastGen))
+
+	urlErr := &url.Error{Op: "GET", URL: "/url", Err: errors.New("internal golang err")}
+	fastGen = namedErr.Wrap(urlErr).FastGen("fast gen")
+	require.Equal(t, `fast gen: GET "/url": internal golang err`, GetErrStackMsg(fastGen))
 }
